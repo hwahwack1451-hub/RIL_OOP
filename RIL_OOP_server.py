@@ -1,4 +1,12 @@
-import socket, threading, json, os, psutil, win32api, time
+import socket
+import threading
+import tkinter as tk
+from tkinter import scrolledtext
+import json
+import os
+import psutil
+import win32api
+import time
 from datetime import datetime
 from pywinauto.application import Application
 from pywinauto import timings
@@ -8,7 +16,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 class DeviceController:
     def __init__(self):
-        self.retry_count = 2  # 실패 시 재시도
+        self.retry_count = 2
 
     def log(self, device_name, msg):
         log_file = os.path.join(LOG_DIR, f"{device_name}_{datetime.now().strftime('%Y%m%d')}.log")
@@ -28,20 +36,15 @@ class DeviceController:
             result = "int_failed"
             while attempt <= self.retry_count:
                 try:
-                    # 프로세스 종료
                     if proc_name:
                         for proc in psutil.process_iter():
                             if proc.name() == proc_name:
                                 proc.kill()
                                 self.log(device_name, f"Killed process {proc_name}")
-
-                    # 프로그램 실행
                     if exe_path:
                         win32api.ShellExecute(0, 'open', exe_path, '', '', 1)
                         self.log(device_name, f"Started {exe_path}")
                         time.sleep(1)
-
-                    # pywinauto 연결
                     app = Application(backend="uia")
                     timings.wait_until_passes(10, 0.5, lambda: app.connect(title_re=f".*{title}.*"))
                     dlg = app.window()
@@ -66,30 +69,81 @@ class DeviceController:
             results[title] = result
         return results
 
-HOST = '0.0.0.0'
-PORT = 5000
-controller = DeviceController()
+class ServerGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("원격 장치 서버")
+        self.running = False
+        self.server_thread = None
+        self.controller = DeviceController()
+        self.create_ui()
 
-def handle_client(conn, addr):
-    try:
-        data = conn.recv(4096).decode()
-        req = json.loads(data)
-        action = req.get("action")
-        device_info = req.get("device")
-        if action == "restart_login":
-            result = controller.restart_and_login(device_info)
-            conn.send(json.dumps({"status": "ok", "result": result}).encode())
-        else:
-            conn.send(json.dumps({"status": "unknown_action"}).encode())
-    except Exception as e:
-        conn.send(json.dumps({"status": "error", "msg": str(e)}).encode())
-    finally:
-        conn.close()
+    def create_ui(self):
+        self.start_btn = tk.Button(self.root, text="서버 시작", command=self.start_server)
+        self.start_btn.pack(padx=10, pady=5)
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-    s.bind((HOST, PORT))
-    s.listen()
-    print(f"Server listening on {HOST}:{PORT}")
-    while True:
-        conn, addr = s.accept()
-        threading.Thread(target=handle_client, args=(conn, addr)).start()
+        self.stop_btn = tk.Button(self.root, text="서버 종료", command=self.stop_server, state="disabled")
+        self.stop_btn.pack(padx=10, pady=5)
+
+        self.log_area = scrolledtext.ScrolledText(self.root, width=80, height=20)
+        self.log_area.pack(padx=10, pady=5)
+        self.log_area.config(state="disabled")
+
+    def log(self, msg):
+        self.log_area.config(state="normal")
+        self.log_area.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {msg}\n")
+        self.log_area.see(tk.END)
+        self.log_area.config(state="disabled")
+
+    def start_server(self):
+        if self.running:
+            return
+        self.running = True
+        self.server_thread = threading.Thread(target=self.run_server, daemon=True)
+        self.server_thread.start()
+        self.start_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+        self.log("서버 시작")
+
+    def stop_server(self):
+        self.running = False
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+        self.log("서버 종료 신호 전송")
+
+    def run_server(self):
+        HOST = '0.0.0.0'
+        PORT = 5000
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((HOST, PORT))
+            s.listen()
+            s.settimeout(1)  # accept 타임아웃
+            while self.running:
+                try:
+                    conn, addr = s.accept()
+                    threading.Thread(target=self.handle_client, args=(conn, addr), daemon=True).start()
+                except socket.timeout:
+                    continue
+
+    def handle_client(self, conn, addr):
+        self.log(f"{addr} 연결됨")
+        try:
+            data = conn.recv(4096).decode()
+            req = json.loads(data)
+            action = req.get("action")
+            device_info = req.get("device")
+            if action == "restart_login":
+                result = self.controller.restart_and_login(device_info)
+                conn.send(json.dumps({"status": "ok", "result": result}).encode())
+            else:
+                conn.send(json.dumps({"status": "unknown_action"}).encode())
+        except Exception as e:
+            conn.send(json.dumps({"status": "error", "msg": str(e)}).encode())
+        finally:
+            conn.close()
+            self.log(f"{addr} 연결 종료")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    gui = ServerGUI(root)
+    root.mainloop()
